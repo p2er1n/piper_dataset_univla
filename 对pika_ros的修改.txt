@@ -1,0 +1,19 @@
+start_single_sensor.bash:
+	修改最后一行代码，将fisheye_port改成想要的RGB摄像头设备的端口。
+	sensor_tools包下的usb_camera.py脚本会使用此设备进行数据采集。
+	发布到全局的话题为：/camera_fisheye/color/image_raw
+
+sensor_tools包下的open_single_sensor.launch:
+	在include rs_camera.launch的节点中添加参数 <arg name="serial_no" value="327122077522"/>。
+	这个serial_no的值使用realsense_viewer来获取。
+	作用是选择想要使用的realsense摄像头。
+	发布的话题为：/camera/color/image_raw。
+
+--- 上面两个部分改完之后，实现了采集任意想要的摄像头数据的功能，这两个摄像头一个是realsense的，一个是任意USB摄像头。
+
+data_tools包下的config/single_pika_data_params.yaml:
+	arm/jointState部分添加pika,/joint_states_single
+	arm/endPose部分添加pika_end,/piper_FK/urdf_end_pose_orient,true
+
+--- 这样就定义好了数据采集采集哪些部分
+--- 之后运行数据采集、同步，然后执行convert.py（或者执行run_convert.sh批量转换）转换成UniVLA接收的格式，然后调用trim_hdf5.py确保不同episode数据集长度保持一致。
