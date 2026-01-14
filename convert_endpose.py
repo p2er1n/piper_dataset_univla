@@ -1,6 +1,7 @@
 # 将提供的hdf5的文件中的"arm/jointStatePosition/pika"下的数据用于构建 action
 # action 的前六个部分从 "arm/endPose/pika_end" 中获取，其余部分沿用 qpos
 # 将 "camera/color/pikaDepthCamera" 下的图片读取并 resize 到 256x256，保存到 RLDS 的 observation/image
+# 将 "arm/endPose/pika_end" 前六维 + padding + gripper 保存到 observation/state
 # qpos 不再保存
 # 指令通过脚本参数提供，language_instruction 需要为每一步保存，形状为 (episode_len,)
 
@@ -95,7 +96,7 @@ def load_action(src_file, debug=False):
 def binarize_gripper_top10(action, gripper_index=-1, debug=False):
     gripper = action[:, gripper_index].astype(np.float32)
     threshold = np.quantile(gripper, 0.1)
-    binarized = np.where(gripper <= threshold, -1.0, 1.0)
+    binarized = np.where(gripper <= threshold, 1.0, -1.0)
     for i in range(action.shape[0]):
         debug_print(
             debug,
@@ -107,6 +108,39 @@ def binarize_gripper_top10(action, gripper_index=-1, debug=False):
         )
     action[:, gripper_index] = binarized
     return action
+
+
+def load_state(src_file, action_len, gripper_index=-1, debug=False):
+    if "arm/endPose/pika_end" not in src_file:
+        raise KeyError("未找到 'arm/endPose/pika_end'")
+    if "arm/jointStatePosition/pika" not in src_file:
+        raise KeyError("未找到 'arm/jointStatePosition/pika'")
+
+    end_pose = src_file["arm/endPose/pika_end"][:]
+    qpos = src_file["arm/jointStatePosition/pika"][:]
+    min_steps = min(end_pose.shape[0], qpos.shape[0])
+    if min_steps == 0:
+        raise ValueError("endPose 或 qpos 为空，无法构建 state")
+    if end_pose.shape[0] != qpos.shape[0]:
+        debug_print(debug, "警告: endPose 与 qpos 的时间步长度不一致，按最小长度对齐")
+    end_pose = end_pose[:min_steps]
+    qpos = qpos[:min_steps]
+
+    state_steps = min(action_len, end_pose.shape[0] - 1)
+    if state_steps <= 0:
+        raise ValueError("action 长度不足，无法构建 state")
+
+    state = np.zeros((state_steps, 8), dtype=np.float32)
+    pose_dim = min(6, end_pose.shape[-1])
+    state[:, :pose_dim] = end_pose[:state_steps, :pose_dim]
+    state[:, 6] = 0.0
+
+    if qpos.ndim == 1:
+        gripper = qpos[:state_steps]
+    else:
+        gripper = qpos[:state_steps, gripper_index]
+    state[:, 7] = gripper.astype(np.float32)
+    return state
 
 
 def load_images(src_file, hdf5_dir, resize_hw=(256, 256), debug=False):
@@ -152,6 +186,7 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
         hdf5_paths,
         instruction,
         action_dim,
+        state_dim,
         image_shape,
         episode_instructions=None,
         debug=False,
@@ -163,6 +198,7 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
             list(episode_instructions) if episode_instructions is not None else None
         )
         self._action_dim = action_dim
+        self._state_dim = state_dim
         self._image_shape = image_shape
         self._debug = debug
         super().__init__(**kwargs)
@@ -180,6 +216,11 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
                                         dtype=np.uint8,
                                         encoding_format="jpeg",
                                         doc="Main camera RGB observation.",
+                                    ),
+                                    "state": tfds.features.Tensor(
+                                        shape=(self._state_dim,),
+                                        dtype=np.float32,
+                                        doc="End-effector state with padding and gripper.",
                                     ),
                                 }
                             ),
@@ -238,11 +279,13 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
 
                 action = load_action(src_file, debug=self._debug)
                 action = binarize_gripper_top10(action, debug=self._debug)
+                state = load_state(src_file, action.shape[0], debug=self._debug)
+                state = binarize_gripper_top10(state, gripper_index=7, debug=self._debug)
                 images = load_images(src_file, hdf5_dir, debug=self._debug)
 
-            episode_len = min(len(images), action.shape[0])
-            if len(images) != action.shape[0]:
-                print("警告: action 与图片数量不一致，按最小长度对齐")
+            episode_len = min(len(images), action.shape[0], state.shape[0])
+            if len(images) != action.shape[0] or action.shape[0] != state.shape[0]:
+                print("警告: action/state/图片数量不一致，按最小长度对齐")
 
             if self._episode_instructions is not None:
                 instruction = self._episode_instructions[episode_idx]
@@ -253,16 +296,16 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
             for i in range(episode_len):
                 steps.append(
                     {
-                        "observation": {"image": images[i]},
+                        "observation": {"image": images[i], "state": state[i]},
                         "action": action[i].astype(np.float32),
                         "discount": 1.0,
                         "reward": float(i == (episode_len - 1)),
                         "is_first": i == 0,
                         "is_last": i == (episode_len - 1),
                         "is_terminal": i == (episode_len - 1),
-                    "language_instruction": instruction,
-                }
-            )
+                        "language_instruction": instruction,
+                    }
+                )
 
             sample = {
                 "steps": steps,
@@ -293,14 +336,17 @@ def main():
 
     with h5py.File(args.hdf5_paths[0], "r") as src_file:
         action = load_action(src_file, debug=args.debug)
+        state = load_state(src_file, action.shape[0], debug=args.debug)
 
     action_dim = action.shape[1]
+    state_dim = state.shape[1]
     image_shape = (256, 256, 3)
 
     builder = EndposeRLDSDataset(
         hdf5_paths=args.hdf5_paths,
         instruction=args.instruction or "",
         action_dim=action_dim,
+        state_dim=state_dim,
         image_shape=image_shape,
         episode_instructions=episode_instructions,
         debug=args.debug,
