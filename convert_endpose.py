@@ -1,7 +1,7 @@
 # 将提供的hdf5的文件中的"arm/jointStatePosition/pika"下的数据用于构建 action
-# action 的前六个部分从 "arm/endPose/pika_end" 中获取，其余部分沿用 qpos
+# action 的前六个部分从 "arm/endPose/piper_end" 中获取，其余部分沿用 qpos
 # 将 "camera/color/pikaDepthCamera" 下的图片读取并 resize 到 256x256，保存到 RLDS 的 observation/image
-# 将 "arm/endPose/pika_end" 前六维 + padding + gripper 保存到 observation/state
+# 将 "arm/endPose/piper_end" 前六维 + padding + gripper 保存到 observation/state
 # qpos 不再保存
 # 指令通过脚本参数提供，language_instruction 需要为每一步保存，形状为 (episode_len,)
 
@@ -32,8 +32,8 @@ def load_action(src_file, debug=False):
     action = data_action.copy()
     original_steps = action.shape[0]
 
-    if "arm/endPose/pika_end" in src_file:
-        end_pose = src_file["arm/endPose/pika_end"][:]
+    if "arm/endPose/piper_end" in src_file:
+        end_pose = src_file["arm/endPose/piper_end"][:]
         if action.shape[0] != end_pose.shape[0]:
             print("警告: endPose 与 qpos 的时间步长度不一致，按最小长度对齐")
             min_steps = min(action.shape[0], end_pose.shape[0])
@@ -82,7 +82,7 @@ def load_action(src_file, debug=False):
         else:
             print("警告: endPose 与 qpos 维度不一致，未替换 action 前六个部分")
     else:
-        print("警告: 未找到 'arm/endPose/pika_end'，action 将与 qpos 相同")
+        print("警告: 未找到 'arm/endPose/piper_end'，action 将与 qpos 相同")
 
     if action.ndim == 1:
         action = action[:, None]
@@ -111,12 +111,12 @@ def binarize_gripper_top10(action, gripper_index=-1, debug=False):
 
 
 def load_state(src_file, action_len, gripper_index=-1, debug=False):
-    if "arm/endPose/pika_end" not in src_file:
-        raise KeyError("未找到 'arm/endPose/pika_end'")
+    if "arm/endPose/piper_end" not in src_file:
+        raise KeyError("未找到 'arm/endPose/piper_end'")
     if "arm/jointStatePosition/pika" not in src_file:
         raise KeyError("未找到 'arm/jointStatePosition/pika'")
 
-    end_pose = src_file["arm/endPose/pika_end"][:]
+    end_pose = src_file["arm/endPose/piper_end"][:]
     qpos = src_file["arm/jointStatePosition/pika"][:]
     min_steps = min(end_pose.shape[0], qpos.shape[0])
     if min_steps == 0:
