@@ -7,6 +7,11 @@ Expected RLDS step format (from convert_endpose.py):
 
 gripper is in [-1, 1], where -1 = open, 1 = close.
 The gripper range is 0 - 0.07 m, and GripperCtrl expects distance in 0.01 mm.
+
+Replay modes:
+- state: use observation/state for every step (default).
+- action_delta: initialize from observation/state[0], then apply
+  action = [dx, dy, dz, rx, ry, rz, ...] each step to update pose.
 """
 
 import argparse
@@ -58,6 +63,20 @@ def gripper_to_ctrl(gripper, max_range_m, gripper_scale):
     return round(distance_m * gripper_scale)
 
 
+def apply_action_delta(state, action, gripper_index):
+    if action.shape[0] < 6:
+        raise ValueError("action has fewer than 6 dims; expected dx dy dz rx ry rz")
+
+    next_state = state.copy()
+    next_state[0:3] = next_state[0:3] + action[0:3]
+    next_state[3:6] = action[3:6]
+    if action.shape[0] >= 7 and gripper_index is not None:
+        if not (-action.shape[0] <= gripper_index < action.shape[0]):
+            raise IndexError("action_gripper_index out of range for action shape")
+        next_state[7] = action[gripper_index]
+    return next_state
+
+
 def get_episode(builder, split, episode_idx):
     ds = builder.as_dataset(split=split)
     for idx, episode in enumerate(tfds.as_numpy(ds)):
@@ -91,6 +110,8 @@ def replay_episode(
     rot_scale,
     max_gripper_range_m,
     gripper_scale,
+    mode,
+    action_gripper_index,
     dry_run,
 ):
     builder = tfds.builder_from_directory(rlds_dir)
@@ -114,31 +135,77 @@ def replay_episode(
 
     sleep_time = 1.0 / fps if fps > 0 else 0.0
     step_idx = 0
-    for step in iter_steps(steps):
-        obs = step["observation"]
-        state = obs["state"].astype(np.float32)
-        X, Y, Z, RX, RY, RZ = state_to_endpose(state, pos_scale, rot_scale)
-        gripper_ctrl = gripper_to_ctrl(
-            state[7],
-            max_gripper_range_m,
-            gripper_scale,
-        )
 
-        if not dry_run:
-            piper.MotionCtrl_2(0x01, 0x00, speed, 0x00)
-            piper.EndPoseCtrl(X, Y, Z, RX, RY, RZ)
-            piper.GripperCtrl(abs(gripper_ctrl), 1000, 0x01, 0)
+    if mode == "action_delta":
+        step_iter = iter_steps(steps)
+        first_step = next(step_iter, None)
+        if first_step is None:
+            return
+        current_state = first_step["observation"]["state"].astype(np.float32)
 
-        print(
-            f"step {step_idx}: "
-            f"endpose=({X}, {Y}, {Z}, {RX}, {RY}, {RZ}) "
-            f"endpose_raw=({state[0]:.6f}, {state[1]:.6f}, {state[2]:.6f}, {state[3]:.6f}, {state[4]:.6f}, {state[5]:.6f}) "
-            f"gripper_raw={state[7]:.6f} "
-            f"gripper={gripper_ctrl}"
-        )
-        step_idx += 1
-        if sleep_time > 0:
-            time.sleep(sleep_time)
+        step = first_step
+        while step is not None:
+            action = step["action"].astype(np.float32)
+            current_state = apply_action_delta(
+                current_state,
+                action,
+                action_gripper_index,
+            )
+            X, Y, Z, RX, RY, RZ = state_to_endpose(
+                current_state, pos_scale, rot_scale
+            )
+            gripper_ctrl = gripper_to_ctrl(
+                current_state[7],
+                max_gripper_range_m,
+                gripper_scale,
+            )
+
+            if not dry_run:
+                piper.MotionCtrl_2(0x01, 0x00, speed, 0x00)
+                piper.EndPoseCtrl(X, Y, Z, RX, RY, RZ)
+                piper.GripperCtrl(abs(gripper_ctrl), 1000, 0x01, 0)
+
+            print(
+                f"step {step_idx}: "
+                f"action=({action[0]:.6f}, {action[1]:.6f}, {action[2]:.6f}, "
+                f"{action[3]:.6f}, {action[4]:.6f}, {action[5]:.6f}) "
+                f"endpose=({X}, {Y}, {Z}, {RX}, {RY}, {RZ}) "
+                f"state_raw=({current_state[0]:.6f}, {current_state[1]:.6f}, "
+                f"{current_state[2]:.6f}, {current_state[3]:.6f}, "
+                f"{current_state[4]:.6f}, {current_state[5]:.6f}) "
+                f"gripper_raw={current_state[7]:.6f} "
+                f"gripper={gripper_ctrl}"
+            )
+            step_idx += 1
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            step = next(step_iter, None)
+    else:
+        for step in iter_steps(steps):
+            obs = step["observation"]
+            state = obs["state"].astype(np.float32)
+            X, Y, Z, RX, RY, RZ = state_to_endpose(state, pos_scale, rot_scale)
+            gripper_ctrl = gripper_to_ctrl(
+                state[7],
+                max_gripper_range_m,
+                gripper_scale,
+            )
+
+            if not dry_run:
+                piper.MotionCtrl_2(0x01, 0x00, speed, 0x00)
+                piper.EndPoseCtrl(X, Y, Z, RX, RY, RZ)
+                piper.GripperCtrl(abs(gripper_ctrl), 1000, 0x01, 0)
+
+            print(
+                f"step {step_idx}: "
+                f"endpose=({X}, {Y}, {Z}, {RX}, {RY}, {RZ}) "
+                f"endpose_raw=({state[0]:.6f}, {state[1]:.6f}, {state[2]:.6f}, {state[3]:.6f}, {state[4]:.6f}, {state[5]:.6f}) "
+                f"gripper_raw={state[7]:.6f} "
+                f"gripper={gripper_ctrl}"
+            )
+            step_idx += 1
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
 
 def main():
@@ -203,6 +270,18 @@ def main():
         help="Meters to GripperCtrl units (0.01mm -> 1000000).",
     )
     parser.add_argument(
+        "--mode",
+        choices=("state", "action_delta"),
+        default="state",
+        help="Replay mode: state or action_delta (default: state).",
+    )
+    parser.add_argument(
+        "--action_gripper_index",
+        type=int,
+        default=-1,
+        help="Action index to read gripper when using action_delta (default: -1).",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         help="List episode counts and exit.",
@@ -236,6 +315,8 @@ def main():
         rot_scale=args.rot_scale,
         max_gripper_range_m=args.gripper_max_m,
         gripper_scale=args.gripper_scale,
+        mode=args.mode,
+        action_gripper_index=args.action_gripper_index,
         dry_run=args.dry_run,
     )
 
