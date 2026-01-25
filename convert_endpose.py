@@ -61,7 +61,13 @@ def load_action(src_file, debug=False):
                 diff_xyz = end_pose[1:, :3] - end_pose[:-1, :3]
                 action[:-1, :3] = diff_xyz
                 if slice_len > 3:
-                    action[:-1, 3:slice_len] = end_pose[1:, 3:slice_len]
+                    if slice_len >= 6:
+                        diff_rpy = end_pose[1:, 3:6] - end_pose[:-1, 3:6]
+                        action[:-1, 3:6] = diff_rpy
+                        if slice_len > 6:
+                            action[:-1, 6:slice_len] = end_pose[1:, 6:slice_len]
+                    else:
+                        action[:-1, 3:slice_len] = end_pose[1:, 3:slice_len]
                 if action.shape[-1] > slice_len:
                     action[:-1, slice_len:] = action[1:, slice_len:]
                 action = action[:-1]
@@ -69,11 +75,11 @@ def load_action(src_file, debug=False):
                     for i in range(action.shape[0]):
                         debug_print(
                             debug,
-                            "新步索引 {new_idx} 的 action[3:6]={new_vals} 来自原索引 {src_idx} 的 end_pose[3:6]={src_vals}".format(
+                            "新步索引 {new_idx} 的 action[3:6]={new_vals} 来自原索引 {src_idx} 的 end_pose 差值 {diff_vals}".format(
                                 new_idx=i,
                                 src_idx=i + 1,
                                 new_vals=action[i, 3:6],
-                                src_vals=end_pose[i + 1, 3:6],
+                                diff_vals=end_pose[i + 1, 3:6] - end_pose[i, 3:6],
                             )
                         )
                 debug_print(debug, "已将 endPose 前三维替换为相邻步差值，其余部分使用下一步数据，并丢弃最后一步")
