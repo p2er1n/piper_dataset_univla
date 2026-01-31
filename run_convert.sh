@@ -24,7 +24,7 @@ if [[ "$script_base" == "convert_endpose.py" ]]; then
     if [[ -z "$instruction_spec" ]]; then
         echo "用法: $0 convert_endpose.py \"instruction\" [extra_args...]"
         echo "或: $0 convert_endpose.py \"instr1:l1,instr2:l2\" --range START END [extra_args...]"
-        echo "可选: --debug --debug_convert"
+        echo "可选: --debug --debug_convert --sample_interval N --gripper_quantile Q"
         exit 1
     fi
     shift || true

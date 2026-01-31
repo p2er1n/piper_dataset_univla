@@ -99,9 +99,9 @@ def load_action(src_file, debug=False):
     return action
 
 
-def binarize_gripper_top10(action, gripper_index=-1, debug=False):
+def binarize_gripper_top10(action, gripper_index=-1, quantile=0.1, debug=False):
     gripper = action[:, gripper_index].astype(np.float32)
-    threshold = np.quantile(gripper, 0.1)
+    threshold = np.quantile(gripper, quantile)
     binarized = np.where(gripper <= threshold, 1.0, -1.0)
     for i in range(action.shape[0]):
         debug_print(
@@ -194,6 +194,8 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
         action_dim,
         state_dim,
         image_shape,
+        sample_interval=1,
+        gripper_quantile=0.1,
         episode_instructions=None,
         debug=False,
         **kwargs,
@@ -206,6 +208,8 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
         self._action_dim = action_dim
         self._state_dim = state_dim
         self._image_shape = image_shape
+        self._sample_interval = max(int(sample_interval), 1)
+        self._gripper_quantile = gripper_quantile
         self._debug = debug
         super().__init__(**kwargs)
 
@@ -284,14 +288,32 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
                     print("\n开始转换...\n")
 
                 action = load_action(src_file, debug=self._debug)
-                action = binarize_gripper_top10(action, debug=self._debug)
+                action = binarize_gripper_top10(
+                    action,
+                    quantile=self._gripper_quantile,
+                    debug=self._debug,
+                )
                 state = load_state(src_file, action.shape[0], debug=self._debug)
-                state = binarize_gripper_top10(state, gripper_index=7, debug=self._debug)
+                state = binarize_gripper_top10(
+                    state,
+                    gripper_index=7,
+                    quantile=self._gripper_quantile,
+                    debug=self._debug,
+                )
                 images = load_images(src_file, hdf5_dir, debug=self._debug)
 
             episode_len = min(len(images), action.shape[0], state.shape[0])
             if len(images) != action.shape[0] or action.shape[0] != state.shape[0]:
                 print("警告: action/state/图片数量不一致，按最小长度对齐")
+            action = action[:episode_len]
+            state = state[:episode_len]
+            images = images[:episode_len]
+
+            if self._sample_interval > 1:
+                action = action[:: self._sample_interval]
+                state = state[:: self._sample_interval]
+                images = images[:: self._sample_interval]
+                episode_len = len(images)
 
             if self._episode_instructions is not None:
                 instruction = self._episode_instructions[episode_idx]
@@ -327,6 +349,8 @@ def main():
     parser.add_argument("--output_dir", default="data_converted_endpose_rlds")
     parser.add_argument("--instruction")
     parser.add_argument("--instruction_file")
+    parser.add_argument("--sample_interval", type=int, default=1)
+    parser.add_argument("--gripper_quantile", type=float, default=0.1)
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -354,6 +378,8 @@ def main():
         action_dim=action_dim,
         state_dim=state_dim,
         image_shape=image_shape,
+        sample_interval=args.sample_interval,
+        gripper_quantile=args.gripper_quantile,
         episode_instructions=episode_instructions,
         debug=args.debug,
         data_dir=args.output_dir,
