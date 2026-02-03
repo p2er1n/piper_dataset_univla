@@ -24,7 +24,7 @@ def print_hdf5_structure(name, obj):
     print(f"{name}: {type(obj)}")
 
 
-def load_action(src_file, debug=False):
+def load_action(src_file, sample_interval=1, debug=False):
     if "arm/jointStatePosition/pika" not in src_file:
         raise KeyError("未找到 'arm/jointStatePosition/pika'")
 
@@ -39,6 +39,13 @@ def load_action(src_file, debug=False):
             min_steps = min(action.shape[0], end_pose.shape[0])
             action = action[:min_steps]
             end_pose = end_pose[:min_steps]
+        if sample_interval > 1:
+            action = action[::sample_interval]
+            end_pose = end_pose[::sample_interval]
+            debug_print(
+                debug,
+                f"先采样再计算差值: sample_interval={sample_interval}, 步长变为 {action.shape[0]}",
+            )
 
         if action.ndim == end_pose.ndim:
             slice_len = min(6, action.shape[-1], end_pose.shape[-1])
@@ -116,7 +123,9 @@ def binarize_gripper_top10(action, gripper_index=-1, quantile=0.1, debug=False):
     return action
 
 
-def load_state(src_file, action_len, gripper_index=-1, debug=False):
+def load_state(
+    src_file, action_len, sample_interval=1, gripper_index=-1, debug=False
+):
     if "arm/endPose/piper_end" not in src_file:
         raise KeyError("未找到 'arm/endPose/piper_end'")
     if "arm/jointStatePosition/pika" not in src_file:
@@ -131,6 +140,13 @@ def load_state(src_file, action_len, gripper_index=-1, debug=False):
         debug_print(debug, "警告: endPose 与 qpos 的时间步长度不一致，按最小长度对齐")
     end_pose = end_pose[:min_steps]
     qpos = qpos[:min_steps]
+    if sample_interval > 1:
+        end_pose = end_pose[::sample_interval]
+        qpos = qpos[::sample_interval]
+        debug_print(
+            debug,
+            f"state 先采样再对齐: sample_interval={sample_interval}, 步长变为 {end_pose.shape[0]}",
+        )
 
     state_steps = min(action_len, end_pose.shape[0] - 1)
     if state_steps <= 0:
@@ -149,11 +165,19 @@ def load_state(src_file, action_len, gripper_index=-1, debug=False):
     return state
 
 
-def load_images(src_file, hdf5_dir, resize_hw=(256, 256), debug=False):
+def load_images(
+    src_file, hdf5_dir, sample_interval=1, resize_hw=(256, 256), debug=False
+):
     if "camera/color/pikaDepthCamera" not in src_file:
         raise KeyError("未找到 'camera/color/pikaDepthCamera'")
 
     cam_high_paths = src_file["camera/color/pikaDepthCamera"][:]
+    if sample_interval > 1:
+        cam_high_paths = cam_high_paths[::sample_interval]
+        debug_print(
+            debug,
+            f"图片路径先采样: sample_interval={sample_interval}, 数量变为 {len(cam_high_paths)}",
+        )
     images_list = []
     placeholder = np.zeros((resize_hw[1], resize_hw[0], 3), dtype=np.uint8)
 
@@ -287,20 +311,32 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
                     src_file.visititems(print_hdf5_structure)
                     print("\n开始转换...\n")
 
-                action = load_action(src_file, debug=self._debug)
+                action = load_action(
+                    src_file, sample_interval=self._sample_interval, debug=self._debug
+                )
                 action = binarize_gripper_top10(
                     action,
                     quantile=self._gripper_quantile,
                     debug=self._debug,
                 )
-                state = load_state(src_file, action.shape[0], debug=self._debug)
+                state = load_state(
+                    src_file,
+                    action.shape[0],
+                    sample_interval=self._sample_interval,
+                    debug=self._debug,
+                )
                 state = binarize_gripper_top10(
                     state,
                     gripper_index=7,
                     quantile=self._gripper_quantile,
                     debug=self._debug,
                 )
-                images = load_images(src_file, hdf5_dir, debug=self._debug)
+                images = load_images(
+                    src_file,
+                    hdf5_dir,
+                    sample_interval=self._sample_interval,
+                    debug=self._debug,
+                )
 
             episode_len = min(len(images), action.shape[0], state.shape[0])
             if len(images) != action.shape[0] or action.shape[0] != state.shape[0]:
@@ -308,12 +344,6 @@ class EndposeRLDSDataset(tfds.core.GeneratorBasedBuilder):
             action = action[:episode_len]
             state = state[:episode_len]
             images = images[:episode_len]
-
-            if self._sample_interval > 1:
-                action = action[:: self._sample_interval]
-                state = state[:: self._sample_interval]
-                images = images[:: self._sample_interval]
-                episode_len = len(images)
 
             if self._episode_instructions is not None:
                 instruction = self._episode_instructions[episode_idx]
@@ -365,8 +395,12 @@ def main():
             raise ValueError("instruction_file 行数必须与 hdf5_paths 数量一致")
 
     with h5py.File(args.hdf5_paths[0], "r") as src_file:
-        action = load_action(src_file, debug=args.debug)
-        state = load_state(src_file, action.shape[0], debug=args.debug)
+        action = load_action(
+            src_file, sample_interval=args.sample_interval, debug=args.debug
+        )
+        state = load_state(
+            src_file, action.shape[0], sample_interval=args.sample_interval, debug=args.debug
+        )
 
     action_dim = action.shape[1]
     state_dim = state.shape[1]
