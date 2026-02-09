@@ -2,6 +2,7 @@ import os
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from collections import Counter
 
 import numpy as np
 from PIL import Image, ImageTk
@@ -121,6 +122,13 @@ class RldsViewerApp:
 
         self.play_btn = ttk.Button(controls, text="Play", command=self._toggle_play)
         self.play_btn.pack(side=tk.LEFT)
+
+        self.structure_btn = ttk.Button(
+            controls,
+            text="Trajectory Structure",
+            command=self._show_trajectory_structure,
+        )
+        self.structure_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.step_var = tk.IntVar(value=0)
         self.step_scale = ttk.Scale(
@@ -272,6 +280,72 @@ class RldsViewerApp:
         )
         self._set_info(info)
         self.step_label_var.set(f"Step {self.current_step + 1}/{len(steps)}")
+
+    def _describe_value(self, value):
+        if isinstance(value, np.ndarray):
+            return f"ndarray(shape={value.shape}, dtype={value.dtype})"
+        if isinstance(value, np.generic):
+            return f"scalar(dtype={value.dtype}, value={value.item()})"
+        if isinstance(value, dict):
+            return "dict"
+        if isinstance(value, (list, tuple)):
+            return f"{type(value).__name__}(len={len(value)})"
+        return type(value).__name__
+
+    def _collect_paths(self, value, prefix="", out=None):
+        if out is None:
+            out = {}
+        if isinstance(value, dict):
+            for key, item in value.items():
+                next_prefix = f"{prefix}.{key}" if prefix else str(key)
+                self._collect_paths(item, next_prefix, out)
+            return out
+        if isinstance(value, (list, tuple)):
+            path = prefix if prefix else "<root>"
+            out.setdefault(path, []).append(self._describe_value(value))
+            if value:
+                self._collect_paths(value[0], f"{path}[0]", out)
+            return out
+        path = prefix if prefix else "<root>"
+        out.setdefault(path, []).append(self._describe_value(value))
+        return out
+
+    def _format_trajectory_structure(self, episode):
+        steps = episode.get("steps", [])
+        lines = [
+            "Trajectory Structure",
+            f"Num steps: {len(steps)}",
+            "",
+        ]
+
+        episode_meta = {k: v for k, v in episode.items() if k != "steps"}
+        if episode_meta:
+            lines.append("Episode-level fields:")
+            for key, value in episode_meta.items():
+                lines.append(f"- {key}: {self._describe_value(value)}")
+            lines.append("")
+
+        if not steps:
+            lines.append("No steps found.")
+            return "\n".join(lines)
+
+        lines.append("Per-step fields (summarized across steps):")
+        path_desc = {}
+        for step in steps:
+            self._collect_paths(step, out=path_desc)
+
+        for path in sorted(path_desc):
+            counter = Counter(path_desc[path])
+            desc = ", ".join(f"{d} x{counter[d]}" for d in sorted(counter))
+            lines.append(f"- {path}: {desc}")
+
+        return "\n".join(lines)
+
+    def _show_trajectory_structure(self):
+        if self.current_episode is None:
+            messagebox.showinfo("No episode", "Please load and select an episode first.")
+            return
+        self._set_info(self._format_trajectory_structure(self.current_episode))
 
     def _toggle_play(self):
         if self.current_episode is None:
