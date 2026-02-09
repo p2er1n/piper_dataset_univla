@@ -1,8 +1,10 @@
 import os
+import io
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from collections import Counter
+from contextlib import redirect_stderr, redirect_stdout
 
 import numpy as np
 from PIL import Image, ImageTk
@@ -78,8 +80,10 @@ class RldsViewerApp:
         self.playing = False
         self.play_job = None
         self.max_episodes = 200
+        self.exec_globals = {}
 
         self._build_ui()
+        self._init_exec_env()
 
     def _build_ui(self):
         top = ttk.Frame(self.root, padding=8)
@@ -150,6 +154,32 @@ class RldsViewerApp:
         self.info_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.info_text.configure(state=tk.DISABLED)
 
+        runner = ttk.LabelFrame(right, text="Python Runner", padding=8)
+        runner.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        runner_controls = ttk.Frame(runner)
+        runner_controls.pack(side=tk.TOP, fill=tk.X)
+        ttk.Button(runner_controls, text="Run", command=self._run_python_code).pack(side=tk.LEFT)
+        ttk.Button(
+            runner_controls,
+            text="Template",
+            command=self._insert_python_template,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        self.code_text = tk.Text(runner, height=8, wrap=tk.NONE)
+        self.code_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.code_text.insert(
+            "1.0",
+            "# Auto-imported: np, tfds, os, Image\n"
+            "# Context: dataset_dir, episodes, current_episode, current_step, step, app\n"
+            "print('episodes =', len(episodes))\n",
+        )
+
+        ttk.Label(runner, text="Output").pack(side=tk.TOP, anchor="w", pady=(8, 0))
+        self.code_output_text = tk.Text(runner, height=8, wrap=tk.WORD)
+        self.code_output_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.code_output_text.configure(state=tk.DISABLED)
+
         if TkinterDnD:
             self.drop_label.drop_target_register(DND_FILES)
             self.drop_label.dnd_bind("<<Drop>>", self._on_drop)
@@ -159,6 +189,87 @@ class RldsViewerApp:
         self.info_text.delete("1.0", tk.END)
         self.info_text.insert(tk.END, text)
         self.info_text.configure(state=tk.DISABLED)
+
+    def _set_code_output(self, text):
+        self.code_output_text.configure(state=tk.NORMAL)
+        self.code_output_text.delete("1.0", tk.END)
+        self.code_output_text.insert(tk.END, text)
+        self.code_output_text.configure(state=tk.DISABLED)
+
+    def _init_exec_env(self):
+        self.exec_globals = {
+            "__builtins__": __builtins__,
+            "np": np,
+            "tfds": tfds,
+            "os": os,
+            "Image": Image,
+        }
+        self._refresh_exec_context()
+
+    def _current_step_data(self):
+        if self.current_episode is None:
+            return None
+        steps = self.current_episode.get("steps", [])
+        if not steps:
+            return None
+        idx = min(max(self.current_step, 0), len(steps) - 1)
+        return steps[idx]
+
+    def _refresh_exec_context(self):
+        self.exec_globals.update(
+            {
+                "app": self,
+                "dataset_dir": self.dataset_dir,
+                "episodes": self.episodes,
+                "current_episode": self.current_episode,
+                "current_step": self.current_step,
+                "step": self._current_step_data(),
+            }
+        )
+
+    def _insert_python_template(self):
+        template = (
+            "# Auto-imported: np, tfds, os, Image\n"
+            "# Context: dataset_dir, episodes, current_episode, current_step, step, app\n"
+            "print('dataset_dir =', dataset_dir)\n"
+            "print('num_episodes =', len(episodes))\n"
+            "if current_episode is not None:\n"
+            "    print('num_steps =', len(current_episode['steps']))\n"
+            "    print('step keys =', list(step.keys()))\n"
+        )
+        self.code_text.delete("1.0", tk.END)
+        self.code_text.insert("1.0", template)
+
+    def _run_python_code(self):
+        code = self.code_text.get("1.0", tk.END).strip()
+        if not code:
+            self._set_code_output("No code to run.")
+            return
+
+        self._refresh_exec_context()
+        out_buf = io.StringIO()
+        result = None
+        error = None
+
+        try:
+            with redirect_stdout(out_buf), redirect_stderr(out_buf):
+                try:
+                    compiled = compile(code, "<rlds_viewer>", "eval")
+                    result = eval(compiled, self.exec_globals, self.exec_globals)
+                except SyntaxError:
+                    compiled = compile(code, "<rlds_viewer>", "exec")
+                    exec(compiled, self.exec_globals, self.exec_globals)
+        except Exception as exc:
+            error = exc
+
+        output = out_buf.getvalue()
+        if result is not None:
+            output += repr(result) + "\n"
+        if error is not None:
+            output += f"{type(error).__name__}: {error}\n"
+        if not output:
+            output = "Code executed successfully (no output)."
+        self._set_code_output(output)
 
     def _open_dialog(self):
         path = filedialog.askdirectory()
@@ -193,6 +304,7 @@ class RldsViewerApp:
         self.current_episode = None
         self.current_step = 0
         self._set_info("")
+        self._refresh_exec_context()
 
         thread = threading.Thread(target=self._load_worker, daemon=True)
         thread.start()
@@ -218,6 +330,7 @@ class RldsViewerApp:
         self.path_var.set(f"Loaded {name} from {self.dataset_dir} ({len(self.episodes)} episodes)")
         for idx in range(len(self.episodes)):
             self.episode_list.insert(tk.END, f"Episode {idx:04d}")
+        self._refresh_exec_context()
         if self.episodes:
             self.episode_list.selection_set(0)
             self._load_episode(0)
@@ -241,12 +354,14 @@ class RldsViewerApp:
         self.step_scale.configure(to=max(len(steps) - 1, 0))
         self.step_var.set(0)
         self._render_step()
+        self._refresh_exec_context()
 
     def _on_step_change(self, _value):
         if self.current_episode is None:
             return
         self.current_step = int(float(self.step_var.get()))
         self._render_step()
+        self._refresh_exec_context()
 
     def _render_step(self):
         if self.current_episode is None:
